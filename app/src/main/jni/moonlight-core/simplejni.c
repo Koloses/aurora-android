@@ -33,6 +33,11 @@ Java_com_limelight_nvstream_jni_MoonBridge_sendMouseButton(JNIEnv *env, jclass c
 }
 
 JNIEXPORT void JNICALL
+Java_com_limelight_nvstream_jni_MoonBridge_sendPhaseOffset(JNIEnv *env, jclass clazz, jint offsetUs) {
+    LiSendPhaseOffset(offsetUs);
+}
+
+JNIEXPORT void JNICALL
 Java_com_limelight_nvstream_jni_MoonBridge_sendMultiControllerInput(JNIEnv *env, jclass clazz, jshort controllerNumber,
                                                            jshort activeGamepadMask, jint buttonFlags,
                                                            jbyte leftTrigger, jbyte rightTrigger,

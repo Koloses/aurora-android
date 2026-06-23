@@ -362,6 +362,11 @@ public class MoonBridge {
 
     public static native void sendMouseButton(byte buttonEvent, byte mouseButton);
 
+    // Phase-offset pacing telemetry (client -> Sunshine host). Forwards the PyroWave
+    // decoder's display-backpressure measurement so the host can lock its capture cadence
+    // to this client's display. No-op on non-Sunshine hosts.
+    public static native void sendPhaseOffset(int offsetUs);
+
     public static native void sendMultiControllerInput(short controllerNumber,
                                     short activeGamepadMask, int buttonFlags,
                                     byte leftTrigger, byte rightTrigger,

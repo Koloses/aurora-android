@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -107,6 +108,13 @@ namespace {
     vk::raii::Semaphore present_sem[2] = {nullptr, nullptr};
     bool have_pending = false;   ///< a submitted-but-not-yet-waited frame exists
     uint32_t parity = 0;
+
+    // Phase-offset pacing (pyrofling-style): time blocked in acquireNextImage = display-clock
+    // backpressure. Stored here per present; the JNI layer hands it to Java which forwards it
+    // to the host via LiSendPhaseOffset. Positive => host produced frames faster than this
+    // client can display them, so the host should slow its capture cadence.
+    int last_phase_offset_us = 0;
+    bool first_frame_done = false;  ///< gate the cold-start acquire out of phase pacing
 
     // Wait for the previously submitted frame's GPU work to finish. Called before
     // reusing the shared decode/convert resources and the input buffers.
@@ -286,6 +294,7 @@ namespace {
       auto &device = ctx->device();
 
       uint32_t idx = 0;
+      auto acquire_start = std::chrono::steady_clock::now();
       try {
         auto [res, i] = swapchain.acquireNextImage(UINT64_MAX, *acquire_sem[parity], nullptr);
         if (res != vk::Result::eSuccess && res != vk::Result::eSuboptimalKHR) {
@@ -295,6 +304,15 @@ namespace {
       } catch (const vk::SystemError &e) {
         PWLOG(ANDROID_LOG_WARN, "acquireNextImage failed: %s", e.what());
         return true;
+      }
+      if (!first_frame_done) {
+        first_frame_done = true;  // skip cold-start acquire (no steady state yet)
+      } else {
+        auto block_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now() - acquire_start).count();
+        if (block_us < 0) block_us = 0;
+        if (block_us > 50000) block_us = 50000;  // clamp pathological stalls (~50 ms)
+        last_phase_offset_us = (int) block_us;
       }
 
       cmd.reset();
@@ -541,6 +559,15 @@ Java_com_limelight_binding_video_PyroWaveDecoder_nativeSubmit(
   // Treat each decode unit as a complete PyroWave frame (intra-only, self-contained).
   bool ok = state->decode_and_present();
   return ok ? DR_OK : DR_NEED_IDR;
+}
+
+// Latest phase-offset measurement (microseconds blocked acquiring a swapchain image).
+// Java reads this after each submit and forwards it to the host via MoonBridge.sendPhaseOffset.
+JNIEXPORT jint JNICALL
+Java_com_limelight_binding_video_PyroWaveDecoder_nativeGetPhaseOffsetUs(
+    JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+  if (handle == 0) { return 0; }
+  return reinterpret_cast<decoder_state *>(handle)->last_phase_offset_us;
 }
 
 JNIEXPORT void JNICALL

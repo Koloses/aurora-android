@@ -2,6 +2,8 @@ package com.limelight.binding.video;
 
 import android.view.Surface;
 
+import com.limelight.nvstream.jni.MoonBridge;
+
 /**
  * JNI wrapper around the native PyroWave Vulkan decoder (libpyrowave-decoder.so).
  *
@@ -28,7 +30,12 @@ public class PyroWaveDecoder {
         if (handle == 0) {
             return -1;
         }
-        return nativeSubmit(handle, data, length);
+        int result = nativeSubmit(handle, data, length);
+        // Phase-offset pacing: forward the native decoder's display-backpressure measurement
+        // to the host so it can lock its capture cadence to this client's display. Inert on
+        // non-Sunshine hosts (MoonBridge.sendPhaseOffset -> LiSendPhaseOffset early-returns).
+        MoonBridge.sendPhaseOffset(nativeGetPhaseOffsetUs(handle));
+        return result;
     }
 
     public void cleanup() {
@@ -40,5 +47,6 @@ public class PyroWaveDecoder {
 
     private native long nativeSetup(Surface surface, int width, int height);
     private native int nativeSubmit(long handle, byte[] data, int length);
+    private native int nativeGetPhaseOffsetUs(long handle);
     private native void nativeCleanup(long handle);
 }
