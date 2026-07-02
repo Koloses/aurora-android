@@ -23,6 +23,10 @@ namespace pyrowave_vk {
     bool shader_float16 = false;
     bool timeline_semaphore = false;
     bool ycbcr_conversion = false;
+    // VK_GOOGLE_display_timing: lets the decoder learn each frame's actual
+    // present time and phase-lock the host capture clock to this display
+    // (smoothness without a jitter buffer). Widely available on Android.
+    bool display_timing = false;
     uint32_t compute_queue_family = UINT32_MAX;
   };
 

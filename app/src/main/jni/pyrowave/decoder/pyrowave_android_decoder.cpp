@@ -27,7 +27,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <memory>
+#include <time.h>
+#include <utility>
 #include <vector>
 
 #include <vulkan/vulkan_raii.hpp>
@@ -109,12 +112,65 @@ namespace {
     bool have_pending = false;   ///< a submitted-but-not-yet-waited frame exists
     uint32_t parity = 0;
 
-    // Phase-offset pacing (pyrofling-style): time blocked in acquireNextImage = display-clock
-    // backpressure. Stored here per present; the JNI layer hands it to Java which forwards it
-    // to the host via LiSendPhaseOffset. Positive => host produced frames faster than this
-    // client can display them, so the host should slow its capture cadence.
+    // Phase-offset pacing (pyrofling-style): the value the JNI layer hands to
+    // Java, which forwards it to the host via LiSendPhaseOffset.
+    //
+    // Preferred source: VK_GOOGLE_display_timing. Each present carries an ID;
+    // vkGetPastPresentationTimingGOOGLE later reports the frame's ACTUAL
+    // present time (CLOCK_MONOTONIC). The submit->present margin, relative to
+    // a small target guard band, is the phase error: positive (frame ready
+    // too early) => host should capture later; negative => earlier. This
+    // phase-locks the host's capture clock to this display - smoothness with
+    // no added buffering - and works under any present mode.
+    //
+    // Fallback (no display timing): time blocked in acquireNextImage, which
+    // is only meaningful under FIFO backpressure.
     int last_phase_offset_us = 0;
     bool first_frame_done = false;  ///< gate the cold-start acquire out of phase pacing
+    bool use_display_timing = false;
+    uint32_t present_counter = 0;
+    std::deque<std::pair<uint32_t, int64_t>> pending_present_times;  ///< (presentID, submit CLOCK_MONOTONIC ns)
+
+    static int64_t now_monotonic_ns() {
+      struct timespec ts {};
+      clock_gettime(CLOCK_MONOTONIC, &ts);
+      return int64_t(ts.tv_sec) * 1000000000ll + ts.tv_nsec;
+    }
+
+    // Drain vkGetPastPresentationTimingGOOGLE and turn the newest entry into a
+    // phase error for the host. Called on the decoder thread around present.
+    void poll_display_timing() {
+      constexpr int64_t kTargetMarginUs = 5000;
+      constexpr int64_t kMaxErrUs = 15000;
+      std::vector<vk::PastPresentationTimingGOOGLE> timings;
+      try {
+        timings = swapchain.getPastPresentationTimingGOOGLE();
+      } catch (const vk::SystemError &) {
+        return;  // transient (e.g. out-of-date); keep the previous value
+      }
+      for (const auto &t : timings) {
+        // Find (and consume up to) the matching submit record.
+        int64_t submit_ns = -1;
+        while (!pending_present_times.empty()) {
+          auto front = pending_present_times.front();
+          if (int32_t(front.first - t.presentID) > 0) {
+            break;  // timing for an ID we no longer track
+          }
+          pending_present_times.pop_front();
+          if (front.first == t.presentID) {
+            submit_ns = front.second;
+            break;
+          }
+        }
+        if (submit_ns < 0) {
+          continue;
+        }
+        int64_t err_us = (int64_t(t.actualPresentTime) - submit_ns) / 1000 - kTargetMarginUs;
+        if (err_us > kMaxErrUs) err_us = kMaxErrUs;
+        if (err_us < -kMaxErrUs) err_us = -kMaxErrUs;
+        last_phase_offset_us = (int) err_us;
+      }
+    }
 
     // Wait for the previously submitted frame's GPU work to finish. Called before
     // reusing the shared decode/convert resources and the input buffers.
@@ -196,17 +252,19 @@ namespace {
         auto pretransform = (caps.supportedTransforms & vk::SurfaceTransformFlagBitsKHR::eIdentity)
           ? vk::SurfaceTransformFlagBitsKHR::eIdentity : caps.currentTransform;
 
-        // Lowest-latency present: prefer IMMEDIATE (present the decoded frame the
-        // instant it is ready - no wait for vblank; may tear). Fall back to MAILBOX
-        // (no tearing but flips on vblank, adding up to ~half a refresh), then FIFO
-        // (vsync-locked, up to a full refresh of latency - worst for game streaming).
+        // Prefer MAILBOX: tear-free and never blocks. With the host's capture
+        // phase-locked to this display (display-timing feedback) frames arrive
+        // just-in-time, so mailbox adds no queueing latency in steady state.
+        // Then IMMEDIATE (tears), then FIFO (always available on Android).
         auto present_modes = phys.getSurfacePresentModesKHR(*surface);
         auto has_mode = [&](vk::PresentModeKHR m) {
           return std::find(present_modes.begin(), present_modes.end(), m) != present_modes.end();
         };
         vk::PresentModeKHR present_mode = vk::PresentModeKHR::eFifo;
-        if (has_mode(vk::PresentModeKHR::eImmediate)) present_mode = vk::PresentModeKHR::eImmediate;
-        else if (has_mode(vk::PresentModeKHR::eMailbox)) present_mode = vk::PresentModeKHR::eMailbox;
+        if (has_mode(vk::PresentModeKHR::eMailbox)) present_mode = vk::PresentModeKHR::eMailbox;
+        else if (has_mode(vk::PresentModeKHR::eImmediate)) present_mode = vk::PresentModeKHR::eImmediate;
+
+        use_display_timing = ctx->caps().display_timing;
 
         swapchain = vk::raii::SwapchainKHR(device, vk::SwapchainCreateInfoKHR {
           .surface = *surface, .minImageCount = img_count,
@@ -227,8 +285,9 @@ namespace {
               .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1}}));
           }
         }
-        PWLOG(ANDROID_LOG_INFO, "swapchain %ux%u present_mode=%d transform=%d direct_present=%d",
-              swap_extent.width, swap_extent.height, (int) present_mode, (int) pretransform, (int) direct_present);
+        PWLOG(ANDROID_LOG_INFO, "swapchain %ux%u present_mode=%d transform=%d direct_present=%d display_timing=%d",
+              swap_extent.width, swap_extent.height, (int) present_mode, (int) pretransform, (int) direct_present,
+              (int) use_display_timing);
 
         // --- Offscreen R8G8B8A8 compute target (matches the shader's rgba8) ---
         vk::ImageCreateInfo ri {
@@ -307,7 +366,8 @@ namespace {
       }
       if (!first_frame_done) {
         first_frame_done = true;  // skip cold-start acquire (no steady state yet)
-      } else {
+      } else if (!use_display_timing) {
+        // Fallback signal (meaningful under FIFO only): time blocked in acquire.
         auto block_us = std::chrono::duration_cast<std::chrono::microseconds>(
                             std::chrono::steady_clock::now() - acquire_start).count();
         if (block_us < 0) block_us = 0;
@@ -427,10 +487,27 @@ namespace {
         .signalSemaphoreCount = 1, .pSignalSemaphores = &*present_sem[parity]}, *fence);
 
       vk::SwapchainKHR sc = *swapchain;
+      vk::PresentTimeGOOGLE ptime {};
+      vk::PresentTimesInfoGOOGLE ptimes {};
+      vk::PresentInfoKHR present_info {
+        .waitSemaphoreCount = 1, .pWaitSemaphores = &*present_sem[parity],
+        .swapchainCount = 1, .pSwapchains = &sc, .pImageIndices = &idx};
+      if (use_display_timing) {
+        ptime.presentID = ++present_counter;
+        ptime.desiredPresentTime = 0;  // as soon as possible
+        ptimes.swapchainCount = 1;
+        ptimes.pTimes = &ptime;
+        present_info.pNext = &ptimes;
+      }
       try {
-        (void) ctx->queue().presentKHR(vk::PresentInfoKHR {
-          .waitSemaphoreCount = 1, .pWaitSemaphores = &*present_sem[parity],
-          .swapchainCount = 1, .pSwapchains = &sc, .pImageIndices = &idx});
+        (void) ctx->queue().presentKHR(present_info);
+        if (use_display_timing) {
+          pending_present_times.emplace_back(ptime.presentID, now_monotonic_ns());
+          while (pending_present_times.size() > 32) {
+            pending_present_times.pop_front();
+          }
+          poll_display_timing();
+        }
       } catch (const vk::SystemError &) {
         // out-of-date / suboptimal: ignored in this first version.
       }
@@ -575,7 +652,14 @@ JNIEXPORT jint JNICALL
 Java_com_limelight_binding_video_PyroWaveDecoder_nativeGetPhaseOffsetUs(
     JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
   if (handle == 0) { return 0; }
-  return reinterpret_cast<decoder_state *>(handle)->last_phase_offset_us;
+  // Consume on read: display-timing measurements arrive a few frames late, and
+  // re-sending a stale error every frame would keep pushing the host's
+  // bang-bang controller in one direction. A consumed 0 falls inside the
+  // controller's deadband and is inert.
+  auto *state = reinterpret_cast<decoder_state *>(handle);
+  int v = state->last_phase_offset_us;
+  state->last_phase_offset_us = 0;
+  return v;
 }
 
 JNIEXPORT void JNICALL

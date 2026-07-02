@@ -110,6 +110,8 @@ namespace pyrowave_vk {
         // Present the decoded frame via a swapchain (GPU compositable) instead of a
         // CPU readback + ANativeWindow software post.
         VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+        // Actual-present-time feedback for host capture phase locking.
+        VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME,
       };
       std::vector<const char *> enabled_exts;
       {
@@ -138,6 +140,11 @@ namespace pyrowave_vk {
       self->caps_.shader_float16 = qf16.shaderFloat16;
       self->caps_.timeline_semaphore = qts.timelineSemaphore;
       self->caps_.ycbcr_conversion = q11.samplerYcbcrConversion;
+      for (auto *e : enabled_exts) {
+        if (std::strcmp(e, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) == 0) {
+          self->caps_.display_timing = true;
+        }
+      }
 
       float prio = 1.0f;
       vk::DeviceQueueCreateInfo queue_info {
