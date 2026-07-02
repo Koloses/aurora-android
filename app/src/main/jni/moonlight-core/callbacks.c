@@ -159,6 +159,15 @@ int BridgeDrSubmitDecodeUnit(PDECODE_UNIT decodeUnit) {
     currentEntry = decodeUnit->bufferList;
     offset = 0;
     while (currentEntry != NULL) {
+        // Fork extension (PyroWave partial frames): a BUFFER_TYPE_GAP entry
+        // marks data following a packet-loss hole. This bridge hands the
+        // decoder one contiguous buffer, so a resync point cannot be conveyed;
+        // truncate the frame at the hole instead. The prefix parses cleanly
+        // and the missing blocks heal via keep-previous + refresh.
+        if (currentEntry->bufferType == BUFFER_TYPE_GAP) {
+            break;
+        }
+
         // Submit parameter set NALUs separately from picture data
         if (currentEntry->bufferType != BUFFER_TYPE_PICDATA) {
             // Use the beginning of the buffer each time since this is a separate
