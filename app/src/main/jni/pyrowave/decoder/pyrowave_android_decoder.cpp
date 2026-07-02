@@ -529,19 +529,27 @@ Java_com_limelight_binding_video_PyroWaveDecoder_nativeSubmit(
   state->wait_prev();
   state->input->clear();
 
-  jbyte *bytes = env->GetByteArrayElements(data, nullptr);
+  // GetPrimitiveArrayCritical avoids the copy GetByteArrayElements typically
+  // makes for a multi-KB frame on the per-frame hot path. push_data() only
+  // does CPU memcpys (no JNI calls, no blocking), so the critical section is
+  // short and safe.
+  void *bytes = env->GetPrimitiveArrayCritical(data, nullptr);
+  if (!bytes) {
+    return DR_NEED_IDR;
+  }
   bool pushed = state->input->push_data(
       std::span<const uint8_t>(reinterpret_cast<const uint8_t *>(bytes), (size_t) length));
-  env->ReleaseByteArrayElements(data, bytes, JNI_ABORT);
+  env->ReleasePrimitiveArrayCritical(data, bytes, JNI_ABORT);
 
   if (!pushed) {
     return DR_NEED_IDR;
   }
 
-  // Drop frames that lost block(s) in transit: decoding them flashes garbage in the
-  // missing regions. PyroWave is intra-only, so just hold the last good frame - the
-  // next frame is a fresh full keyframe. Throttle the log to avoid spam.
-  if (!state->input->is_complete()) {
+  // Incomplete full (code-0) frames would flash zeros in the missing regions,
+  // so hold the last good frame instead. Keep-previous frames (conditional
+  // replenishment) are safe to decode with missing blocks - the decoder simply
+  // retains the previous coefficients there. Throttle the log to avoid spam.
+  if (!state->input->is_complete() && !state->input->keep_previous_frame()) {
     static int incomplete_count = 0;
     if ((++incomplete_count % 30) == 1) {
       PWLOG(ANDROID_LOG_WARN, "incomplete frame %d/%d blocks - holding last good frame (count=%d)",
