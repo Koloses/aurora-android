@@ -241,6 +241,16 @@
             android:title="@string/title_checkbox_disable_warnings"
             android:summary="@string/summary_checkbox_disable_warnings"
             android:defaultValue="false" />
+        <CheckBoxPreference
+            android:key="checkbox_pyrowave_adaptive_fec"
+            android:title="@string/title_checkbox_pyrowave_adaptive_fec"
+            android:summary="@string/summary_checkbox_pyrowave_adaptive_fec"
+            android:defaultValue="false" />
+        <CheckBoxPreference
+            android:key="checkbox_pyrowave_adaptive_bitrate"
+            android:title="@string/title_checkbox_pyrowave_adaptive_bitrate"
+            android:summary="@string/summary_checkbox_pyrowave_adaptive_bitrate"
+            android:defaultValue="false" />
         <ListPreference
             android:key="video_format"
             android:title="@string/title_video_format"

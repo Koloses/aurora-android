@@ -481,6 +481,8 @@ public class Game extends Activity implements SurfaceHolder.Callback,
                 .setAudioConfiguration(prefConfig.audioConfiguration)
                 .setColorSpace(decoderRenderer.getPreferredColorSpace())
                 .setColorRange(decoderRenderer.getPreferredColorRange())
+                .setPyroWaveAdaptiveFec(prefConfig.pyrowaveAdaptiveFec)
+                .setPyroWaveAdaptiveBitrate(prefConfig.pyrowaveAdaptiveBitrate)
                 .setPersistGamepadsAfterDisconnect(!prefConfig.multiController)
                 .build();
 

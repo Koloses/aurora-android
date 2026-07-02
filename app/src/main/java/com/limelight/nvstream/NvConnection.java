@@ -437,7 +437,9 @@ public class NvConnection {
                             context.riKey.getEncoded(), ib.array(),
                             context.videoCapabilities,
                             context.streamConfig.getColorSpace(),
-                            context.streamConfig.getColorRange());
+                            context.streamConfig.getColorRange(),
+                            context.streamConfig.getPyroWaveAdaptiveFec() ? 1 : 0,
+                            context.streamConfig.getPyroWaveAdaptiveBitrate() ? 1 : 0);
                     if (ret != 0) {
                         // LiStartConnection() failed, so the caller is not expected
                         // to stop the connection themselves. We need to release their

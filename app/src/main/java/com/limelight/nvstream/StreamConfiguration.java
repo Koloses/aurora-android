@@ -26,6 +26,9 @@ public class StreamConfiguration {
     private int attachedGamepadMask;
     private int encryptionFlags;
     private int colorRange;
+    // PyroWave adaptive streaming opt-ins (Sunshine extension)
+    private boolean pyroWaveAdaptiveFec;
+    private boolean pyroWaveAdaptiveBitrate;
     private int colorSpace;
     private boolean persistGamepadsAfterDisconnect;
 
@@ -123,6 +126,16 @@ public class StreamConfiguration {
             return this;
         }
 
+        public StreamConfiguration.Builder setPyroWaveAdaptiveFec(boolean enabled) {
+            config.pyroWaveAdaptiveFec = enabled;
+            return this;
+        }
+
+        public StreamConfiguration.Builder setPyroWaveAdaptiveBitrate(boolean enabled) {
+            config.pyroWaveAdaptiveBitrate = enabled;
+            return this;
+        }
+
         public StreamConfiguration.Builder setColorSpace(int colorSpace) {
             config.colorSpace = colorSpace;
             return this;
@@ -216,6 +229,14 @@ public class StreamConfiguration {
 
     public int getColorRange() {
         return colorRange;
+    }
+
+    public boolean getPyroWaveAdaptiveFec() {
+        return pyroWaveAdaptiveFec;
+    }
+
+    public boolean getPyroWaveAdaptiveBitrate() {
+        return pyroWaveAdaptiveBitrate;
     }
 
     public int getColorSpace() {

@@ -33,6 +33,8 @@ public class PreferenceConfiguration {
     private static final String STRETCH_PREF_STRING = "checkbox_stretch_video";
     private static final String SOPS_PREF_STRING = "checkbox_enable_sops";
     private static final String DISABLE_TOASTS_PREF_STRING = "checkbox_disable_warnings";
+    private static final String PYROWAVE_ADAPTIVE_FEC_PREF_STRING = "checkbox_pyrowave_adaptive_fec";
+    private static final String PYROWAVE_ADAPTIVE_BITRATE_PREF_STRING = "checkbox_pyrowave_adaptive_bitrate";
     private static final String HOST_AUDIO_PREF_STRING = "checkbox_host_audio";
     private static final String DEADZONE_PREF_STRING = "seekbar_deadzone";
     private static final String OSC_OPACITY_PREF_STRING = "seekbar_osc_opacity";
@@ -128,6 +130,8 @@ public class PreferenceConfiguration {
     public int deadzonePercentage;
     public int oscOpacity;
     public boolean stretchVideo, enableSops, playHostAudio, disableWarnings;
+    // PyroWave adaptive streaming opt-ins (Sunshine extension), off by default.
+    public boolean pyrowaveAdaptiveFec, pyrowaveAdaptiveBitrate;
     public String language;
     public boolean smallIconMode, multiController, usbDriver, flipFaceButtons;
     public boolean onscreenController;
@@ -577,6 +581,8 @@ public class PreferenceConfiguration {
 
         // Checkbox preferences
         config.disableWarnings = prefs.getBoolean(DISABLE_TOASTS_PREF_STRING, DEFAULT_DISABLE_TOASTS);
+        config.pyrowaveAdaptiveFec = prefs.getBoolean(PYROWAVE_ADAPTIVE_FEC_PREF_STRING, false);
+        config.pyrowaveAdaptiveBitrate = prefs.getBoolean(PYROWAVE_ADAPTIVE_BITRATE_PREF_STRING, false);
         config.enableSops = prefs.getBoolean(SOPS_PREF_STRING, DEFAULT_SOPS);
         config.stretchVideo = prefs.getBoolean(STRETCH_PREF_STRING, DEFAULT_STRETCH);
         config.playHostAudio = prefs.getBoolean(HOST_AUDIO_PREF_STRING, DEFAULT_HOST_AUDIO);
