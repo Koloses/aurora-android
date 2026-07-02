@@ -411,9 +411,15 @@ public class Game extends Activity implements SurfaceHolder.Callback,
 
         // H.264 is always supported
         int supportedVideoFormats = MoonBridge.VIDEO_FORMAT_H264;
-        // Advertise PyroWave (native Vulkan decoder). The host only selects it if it
-        // also supports PyroWave (SCM_PYROWAVE), so this is safe with stock hosts.
-        supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_PYROWAVE;
+        // Advertise PyroWave (native Vulkan decoder) in automatic mode or when the
+        // user forces it. The host only selects it if it also supports PyroWave
+        // (SCM_PYROWAVE), so this is safe with stock hosts. When another codec is
+        // forced, PyroWave must NOT be advertised - PyroWave-preferring hosts pick
+        // it with the highest precedence regardless of the other advertised codecs.
+        if (prefConfig.videoFormat == PreferenceConfiguration.FormatOption.AUTO ||
+                prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE) {
+            supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_PYROWAVE;
+        }
         if (decoderRenderer.isHevcSupported()) {
             supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_H265;
             if (willStreamHdr && decoderRenderer.isHevcMain10Hdr10Supported()) {
@@ -425,6 +431,10 @@ public class Game extends Activity implements SurfaceHolder.Callback,
             if (willStreamHdr && decoderRenderer.isAv1Main10Supported()) {
                 supportedVideoFormats |= MoonBridge.VIDEO_FORMAT_AV1_MAIN10;
             }
+        }
+        if (prefConfig.videoFormat == PreferenceConfiguration.FormatOption.FORCE_PYROWAVE) {
+            // Keep H.264 as the fallback for hosts without PyroWave support.
+            supportedVideoFormats &= (MoonBridge.VIDEO_FORMAT_PYROWAVE | MoonBridge.VIDEO_FORMAT_H264);
         }
 
         int gamepadMask = ControllerHandler.getAttachedControllerMask(this);

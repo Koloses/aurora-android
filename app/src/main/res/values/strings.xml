@@ -288,6 +288,7 @@
     <string name="audioconf_71surround">7.1 Surround Sound</string>
 
     <string name="videoformat_auto">Automatic (Recommended)</string>
+    <string name="videoformat_pyrowavealways">Prefer PyroWave (GPU wavelet)</string>
     <string name="videoformat_av1always">Prefer AV1 (Experimental)</string>
     <string name="videoformat_hevcalways">Prefer HEVC</string>
     <string name="videoformat_h264always">Prefer H.264</string>
