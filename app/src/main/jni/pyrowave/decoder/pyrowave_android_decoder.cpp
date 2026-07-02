@@ -190,7 +190,8 @@ namespace {
       }
     }
 
-    struct ConvPush { int32_t w, h; float inv_w, inv_h; };
+    struct ConvPush { int32_t w, h; float inv_w, inv_h; int32_t src_w, src_h; int32_t sharp; };
+    bool swapchain_stale = false;  ///< out-of-date/suboptimal seen; recreate before next frame
 
     bool init() {
       try {
@@ -223,6 +224,77 @@ namespace {
           PWLOG(ANDROID_LOG_ERROR, "queue family does not support present");
           return false;
         }
+        if (!create_swapchain()) {
+          return false;
+        }
+
+        // --- Offscreen R8G8B8A8 compute target (matches the shader's rgba8) ---
+        vk::ImageCreateInfo ri {
+          .imageType = vk::ImageType::e2D, .format = vk::Format::eR8G8B8A8Unorm,
+          .extent = {.width = (uint32_t) width, .height = (uint32_t) height, .depth = 1},
+          .mipLevels = 1, .arrayLayers = 1,
+          .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc};
+        img_rgba = image_allocation(device, ri, {.usage = VMA_MEMORY_USAGE_AUTO}, "pyrowave rgba");
+        rgba_view = device.createImageView(vk::ImageViewCreateInfo {
+          .image = img_rgba, .viewType = vk::ImageViewType::e2D, .format = vk::Format::eR8G8B8A8Unorm,
+          .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1}});
+
+        // --- yuv2rgba compute pipeline ---
+        sampler = vk::raii::Sampler(device, vk::SamplerCreateInfo {
+          .magFilter = vk::Filter::eLinear, .minFilter = vk::Filter::eLinear,
+          .mipmapMode = vk::SamplerMipmapMode::eNearest,
+          .addressModeU = vk::SamplerAddressMode::eClampToEdge,
+          .addressModeV = vk::SamplerAddressMode::eClampToEdge,
+          .addressModeW = vk::SamplerAddressMode::eClampToEdge});
+        std::array<vk::DescriptorSetLayoutBinding, 5> binds {{
+          {.binding = 0, .descriptorType = vk::DescriptorType::eSampledImage, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
+          {.binding = 1, .descriptorType = vk::DescriptorType::eSampledImage, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
+          {.binding = 2, .descriptorType = vk::DescriptorType::eSampledImage, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
+          {.binding = 3, .descriptorType = vk::DescriptorType::eSampler,      .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
+          {.binding = 4, .descriptorType = vk::DescriptorType::eStorageImage, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
+        }};
+        dsl = vk::raii::DescriptorSetLayout(device, vk::DescriptorSetLayoutCreateInfo {.bindingCount = (uint32_t) binds.size(), .pBindings = binds.data()});
+        vk::PushConstantRange pcr {.stageFlags = vk::ShaderStageFlagBits::eCompute, .offset = 0, .size = sizeof(ConvPush)};
+        pl = vk::raii::PipelineLayout(device, vk::PipelineLayoutCreateInfo {.setLayoutCount = 1, .pSetLayouts = &*dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr});
+        auto conv_sh = PyroWave::load_shader(device, "yuv2rgba");
+        vk::PipelineShaderStageCreateInfo conv_st {.stage = vk::ShaderStageFlagBits::eCompute, .module = *conv_sh, .pName = "main"};
+        pipe = vk::raii::Pipeline(device, nullptr, vk::ComputePipelineCreateInfo {.stage = conv_st, .layout = *pl});
+        std::array<vk::DescriptorPoolSize, 3> psz {{
+          {.type = vk::DescriptorType::eSampledImage, .descriptorCount = 3},
+          {.type = vk::DescriptorType::eSampler,      .descriptorCount = 1},
+          {.type = vk::DescriptorType::eStorageImage, .descriptorCount = 1},
+        }};
+        dpool = vk::raii::DescriptorPool(device, vk::DescriptorPoolCreateInfo {.maxSets = 1, .poolSizeCount = (uint32_t) psz.size(), .pPoolSizes = psz.data()});
+        dset = std::move(vk::raii::DescriptorSets(device, vk::DescriptorSetAllocateInfo {.descriptorPool = *dpool, .descriptorSetCount = 1, .pSetLayouts = &*dsl}).front());
+        vk::DescriptorImageInfo yi {.imageView = *view_y,  .imageLayout = vk::ImageLayout::eGeneral};
+        vk::DescriptorImageInfo cbi {.imageView = *view_cb, .imageLayout = vk::ImageLayout::eGeneral};
+        vk::DescriptorImageInfo cri {.imageView = *view_cr, .imageLayout = vk::ImageLayout::eGeneral};
+        vk::DescriptorImageInfo si {.sampler = *sampler};
+        vk::DescriptorImageInfo oi {.imageView = *rgba_view, .imageLayout = vk::ImageLayout::eGeneral};
+        std::array<vk::WriteDescriptorSet, 5> ws {{
+          {.dstSet = *dset, .dstBinding = 0, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &yi},
+          {.dstSet = *dset, .dstBinding = 1, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &cbi},
+          {.dstSet = *dset, .dstBinding = 2, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &cri},
+          {.dstSet = *dset, .dstBinding = 3, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eSampler,      .pImageInfo = &si},
+          {.dstSet = *dset, .dstBinding = 4, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &oi},
+        }};
+        device.updateDescriptorSets(ws, {});
+        return true;
+      } catch (const std::exception &e) {
+        PWLOG(ANDROID_LOG_ERROR, "vk resource init failed: %s", e.what());
+        return false;
+      }
+    }
+
+    // (Re)creates the swapchain and derived objects for the existing surface.
+    // Called from init() and again on out-of-date/suboptimal (resize, rotation,
+    // compositor changes). Caller must ensure no GPU work is in flight when
+    // recreating.
+    bool create_swapchain() {
+      try {
+        auto &device = ctx->device();
+        auto &phys = ctx->physical_device();
+
         auto caps = phys.getSurfaceCapabilitiesKHR(*surface);
         auto formats = phys.getSurfaceFormatsKHR(*surface);
         vk::ColorSpaceKHR colorspace = formats.empty() ? vk::ColorSpaceKHR::eSrgbNonlinear : formats[0].colorSpace;
@@ -289,62 +361,26 @@ namespace {
               swap_extent.width, swap_extent.height, (int) present_mode, (int) pretransform, (int) direct_present,
               (int) use_display_timing);
 
-        // --- Offscreen R8G8B8A8 compute target (matches the shader's rgba8) ---
-        vk::ImageCreateInfo ri {
-          .imageType = vk::ImageType::e2D, .format = vk::Format::eR8G8B8A8Unorm,
-          .extent = {.width = (uint32_t) width, .height = (uint32_t) height, .depth = 1},
-          .mipLevels = 1, .arrayLayers = 1,
-          .usage = vk::ImageUsageFlagBits::eStorage | vk::ImageUsageFlagBits::eTransferSrc};
-        img_rgba = image_allocation(device, ri, {.usage = VMA_MEMORY_USAGE_AUTO}, "pyrowave rgba");
-        rgba_view = device.createImageView(vk::ImageViewCreateInfo {
-          .image = img_rgba, .viewType = vk::ImageViewType::e2D, .format = vk::Format::eR8G8B8A8Unorm,
-          .subresourceRange = {.aspectMask = vk::ImageAspectFlagBits::eColor, .levelCount = 1, .layerCount = 1}});
-
-        // --- yuv2rgba compute pipeline ---
-        sampler = vk::raii::Sampler(device, vk::SamplerCreateInfo {
-          .magFilter = vk::Filter::eLinear, .minFilter = vk::Filter::eLinear,
-          .mipmapMode = vk::SamplerMipmapMode::eNearest,
-          .addressModeU = vk::SamplerAddressMode::eClampToEdge,
-          .addressModeV = vk::SamplerAddressMode::eClampToEdge,
-          .addressModeW = vk::SamplerAddressMode::eClampToEdge});
-        std::array<vk::DescriptorSetLayoutBinding, 5> binds {{
-          {.binding = 0, .descriptorType = vk::DescriptorType::eSampledImage, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
-          {.binding = 1, .descriptorType = vk::DescriptorType::eSampledImage, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
-          {.binding = 2, .descriptorType = vk::DescriptorType::eSampledImage, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
-          {.binding = 3, .descriptorType = vk::DescriptorType::eSampler,      .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
-          {.binding = 4, .descriptorType = vk::DescriptorType::eStorageImage, .descriptorCount = 1, .stageFlags = vk::ShaderStageFlagBits::eCompute},
-        }};
-        dsl = vk::raii::DescriptorSetLayout(device, vk::DescriptorSetLayoutCreateInfo {.bindingCount = (uint32_t) binds.size(), .pBindings = binds.data()});
-        vk::PushConstantRange pcr {.stageFlags = vk::ShaderStageFlagBits::eCompute, .offset = 0, .size = sizeof(ConvPush)};
-        pl = vk::raii::PipelineLayout(device, vk::PipelineLayoutCreateInfo {.setLayoutCount = 1, .pSetLayouts = &*dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pcr});
-        auto conv_sh = PyroWave::load_shader(device, "yuv2rgba");
-        vk::PipelineShaderStageCreateInfo conv_st {.stage = vk::ShaderStageFlagBits::eCompute, .module = *conv_sh, .pName = "main"};
-        pipe = vk::raii::Pipeline(device, nullptr, vk::ComputePipelineCreateInfo {.stage = conv_st, .layout = *pl});
-        std::array<vk::DescriptorPoolSize, 3> psz {{
-          {.type = vk::DescriptorType::eSampledImage, .descriptorCount = 3},
-          {.type = vk::DescriptorType::eSampler,      .descriptorCount = 1},
-          {.type = vk::DescriptorType::eStorageImage, .descriptorCount = 1},
-        }};
-        dpool = vk::raii::DescriptorPool(device, vk::DescriptorPoolCreateInfo {.maxSets = 1, .poolSizeCount = (uint32_t) psz.size(), .pPoolSizes = psz.data()});
-        dset = std::move(vk::raii::DescriptorSets(device, vk::DescriptorSetAllocateInfo {.descriptorPool = *dpool, .descriptorSetCount = 1, .pSetLayouts = &*dsl}).front());
-        vk::DescriptorImageInfo yi {.imageView = *view_y,  .imageLayout = vk::ImageLayout::eGeneral};
-        vk::DescriptorImageInfo cbi {.imageView = *view_cb, .imageLayout = vk::ImageLayout::eGeneral};
-        vk::DescriptorImageInfo cri {.imageView = *view_cr, .imageLayout = vk::ImageLayout::eGeneral};
-        vk::DescriptorImageInfo si {.sampler = *sampler};
-        vk::DescriptorImageInfo oi {.imageView = *rgba_view, .imageLayout = vk::ImageLayout::eGeneral};
-        std::array<vk::WriteDescriptorSet, 5> ws {{
-          {.dstSet = *dset, .dstBinding = 0, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &yi},
-          {.dstSet = *dset, .dstBinding = 1, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &cbi},
-          {.dstSet = *dset, .dstBinding = 2, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eSampledImage, .pImageInfo = &cri},
-          {.dstSet = *dset, .dstBinding = 3, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eSampler,      .pImageInfo = &si},
-          {.dstSet = *dset, .dstBinding = 4, .descriptorCount = 1, .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &oi},
-        }};
-        device.updateDescriptorSets(ws, {});
+        // Present IDs are per swapchain; reset the display-timing tracking.
+        pending_present_times.clear();
+        present_counter = 0;
         return true;
       } catch (const std::exception &e) {
-        PWLOG(ANDROID_LOG_ERROR, "vk resource init failed: %s", e.what());
+        PWLOG(ANDROID_LOG_ERROR, "swapchain creation failed: %s", e.what());
         return false;
       }
+    }
+
+    bool recreate_swapchain() {
+      PWLOG(ANDROID_LOG_INFO, "recreating swapchain (resize/rotation/out-of-date)");
+      wait_prev();
+      try { (void) ctx->device().waitIdle(); } catch (...) {}
+      swap_storage_views.clear();
+      swap_images.clear();
+      swapchain = nullptr;
+      swapchain_stale = false;
+      first_frame_done = false;  // re-arm the pacing cold start
+      return create_swapchain();
     }
 
     // Decode the current frame into the YCbCr planes, convert to RGBA on the GPU,
@@ -352,14 +388,27 @@ namespace {
     bool decode_and_present() {
       auto &device = ctx->device();
 
+      // The previous frame saw out-of-date/suboptimal (rotation, resize,
+      // compositor change): rebuild the swapchain before decoding into it.
+      if (swapchain_stale && !recreate_swapchain()) {
+        PWLOG(ANDROID_LOG_ERROR, "swapchain recreation failed");
+        return false;
+      }
+
       uint32_t idx = 0;
       auto acquire_start = std::chrono::steady_clock::now();
       try {
         auto [res, i] = swapchain.acquireNextImage(UINT64_MAX, *acquire_sem[parity], nullptr);
-        if (res != vk::Result::eSuccess && res != vk::Result::eSuboptimalKHR) {
+        if (res == vk::Result::eSuboptimalKHR) {
+          // Usable this frame, but rebuild before the next one.
+          swapchain_stale = true;
+        } else if (res != vk::Result::eSuccess) {
           return true;  // transient; skip this frame
         }
         idx = i;
+      } catch (const vk::OutOfDateKHRError &) {
+        swapchain_stale = true;  // rebuilt at the start of the next frame
+        return true;
       } catch (const vk::SystemError &e) {
         PWLOG(ANDROID_LOG_WARN, "acquireNextImage failed: %s", e.what());
         return true;
@@ -429,8 +478,10 @@ namespace {
 
         cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipe);
         cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pl, 0, *dset, {});
+        const bool scaling = swap_extent.width != uint32_t(width) || swap_extent.height != uint32_t(height);
         ConvPush push {(int32_t) swap_extent.width, (int32_t) swap_extent.height,
-                       1.0f / float(swap_extent.width), 1.0f / float(swap_extent.height)};
+                       1.0f / float(swap_extent.width), 1.0f / float(swap_extent.height),
+                       width, height, scaling ? 1 : 0};
         cmd.pushConstants<ConvPush>(*pl, vk::ShaderStageFlagBits::eCompute, 0, push);
         cmd.dispatch((swap_extent.width + 7) / 8, (swap_extent.height + 7) / 8, 1);
 
@@ -445,10 +496,19 @@ namespace {
                 {}, vk::AccessFlagBits::eShaderWrite,
                 vk::PipelineStageFlagBits::eTopOfPipe, vk::PipelineStageFlagBits::eComputeShader);
 
+        // Repoint the output binding at the offscreen image: a previous
+        // direct-present frame (or a pre-recreation swapchain) may have left it
+        // pointing at a swapchain view that no longer exists.
+        vk::DescriptorImageInfo oi {.imageView = *rgba_view, .imageLayout = vk::ImageLayout::eGeneral};
+        vk::WriteDescriptorSet w {.dstSet = *dset, .dstBinding = 4, .descriptorCount = 1,
+          .descriptorType = vk::DescriptorType::eStorageImage, .pImageInfo = &oi};
+        ctx->device().updateDescriptorSets(w, {});
+
         // Dispatch yuv2rgba.
         cmd.bindPipeline(vk::PipelineBindPoint::eCompute, *pipe);
         cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pl, 0, *dset, {});
-        ConvPush push {width, height, 1.0f / float(width), 1.0f / float(height)};
+        ConvPush push {width, height, 1.0f / float(width), 1.0f / float(height),
+                       width, height, 0};
         cmd.pushConstants<ConvPush>(*pl, vk::ShaderStageFlagBits::eCompute, 0, push);
         cmd.dispatch((uint32_t(width) + 7) / 8, (uint32_t(height) + 7) / 8, 1);
 
@@ -508,8 +568,10 @@ namespace {
           }
           poll_display_timing();
         }
-      } catch (const vk::SystemError &) {
-        // out-of-date / suboptimal: ignored in this first version.
+      } catch (const vk::OutOfDateKHRError &) {
+        swapchain_stale = true;  // rebuilt at the start of the next frame
+      } catch (const vk::SystemError &e) {
+        PWLOG(ANDROID_LOG_WARN, "presentKHR failed: %s", e.what());
       }
 
       // Pipelined: do NOT wait here. The next frame's wait_prev() waits this GPU
