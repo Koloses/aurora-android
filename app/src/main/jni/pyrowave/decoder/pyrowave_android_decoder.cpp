@@ -703,6 +703,18 @@ Java_com_limelight_binding_video_PyroWaveDecoder_nativeSubmit(
   // garbage on motion. No-op on coherent memory.
   state->input->flush();
 
+  // Keep-previous frames arriving before any full (code-0) frame: the
+  // stream's initial full frame was lost, so the picture is degraded until
+  // the host sends another one. DR_NEED_IDR makes moonlight request one.
+  if (state->input->awaiting_state_init()) {
+    static int uninit_count = 0;
+    if ((++uninit_count % 60) == 1) {
+      PWLOG(ANDROID_LOG_WARN, "no full frame received yet (initial frame lost); requesting IDR (count=%d)", uninit_count);
+    }
+    (void) state->decode_and_present();
+    return DR_NEED_IDR;
+  }
+
   // Treat each decode unit as a complete PyroWave frame (intra-only, self-contained).
   bool ok = state->decode_and_present();
   return ok ? DR_OK : DR_NEED_IDR;
