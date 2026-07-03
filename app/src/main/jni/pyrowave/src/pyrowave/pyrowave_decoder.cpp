@@ -455,6 +455,7 @@ bool DecoderInput::push_data(std::span<const uint8_t> data)
 					if (diff > (SequenceCountMask / 2))
 					{
 						// All sequences in a packet must be the same.
+						anomaly_count++;
 						std::cerr << "Backwards sequence detected, discarding." << std::endl;
 						return true;
 					}
@@ -469,12 +470,14 @@ bool DecoderInput::push_data(std::span<const uint8_t> data)
 
 				if (header.block_index >= uint32_t(decoder.block_count_32x32))
 				{
+					anomaly_count++;
 					std::cerr << "block_index " << header.block_index << " is out of bounds (>= " << decoder.block_count_32x32 << ")." << std::endl;
 					return false;
 				}
 
 				if (dequant_data[header.block_index] != UINT32_MAX)
 				{
+					anomaly_count++;
 					std::cerr << "block_index " << header.block_index << " is already decoded, skipping." << std::endl;
 					return true;
 				}
@@ -505,6 +508,7 @@ bool DecoderInput::push_data(std::span<const uint8_t> data)
 			if (last_seq != UINT32_MAX && diff > (SequenceCountMask / 2))
 			{
 				// All sequences in a packet must be the same.
+				anomaly_count++;
 				std::cerr << "Backwards sequence detected, discarding." << std::endl;
 				return true;
 			}
@@ -520,6 +524,7 @@ bool DecoderInput::push_data(std::span<const uint8_t> data)
 			{
 				if (seq.width_minus_1 + 1 != decoder.width || seq.height_minus_1 + 1 != decoder.height)
 				{
+					anomaly_count++;
 					std::cerr << "Dimension mismatch in seq packet, (" << seq.width_minus_1 + 1 << ", " << seq.height_minus_1 + 1 << ") != (" << decoder.width << ", " << decoder.height << ")" << std::endl;
 					return false;
 				}
@@ -531,6 +536,7 @@ bool DecoderInput::push_data(std::span<const uint8_t> data)
 			}
 			else
 			{
+				anomaly_count++;
 				std::cerr << "Unrecognized sequence header mode " << seq.code << "." << std::endl;
 				return false;
 			}
