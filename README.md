@@ -1,35 +1,38 @@
-# Moonlight Android
+# Aurora for Android
 
-[![AppVeyor Build Status](https://ci.appveyor.com/api/projects/status/232a8tadrrn8jv0k/branch/master?svg=true)](https://ci.appveyor.com/project/cgutman/moonlight-android/branch/master)
-[![Translation Status](https://hosted.weblate.org/widgets/moonlight/-/moonlight-android/svg-badge.svg)](https://hosted.weblate.org/projects/moonlight/moonlight-android/)
+Aurora is a fork of [Moonlight for Android](https://github.com/moonlight-stream/moonlight-android)
+— the open source Android client for [Sunshine](https://github.com/LizardByte/Sunshine) and NVIDIA
+GameStream — extended with support for **PyroWave**, a GPU-only intra-frame wavelet codec decoded
+entirely in Vulkan compute. Paired with a [Solarflare](https://github.com/Koloses/Solarflare) host,
+PyroWave delivers very low, fixed-latency streaming that bypasses the device's MediaCodec video
+decoder entirely.
 
-[Moonlight for Android](https://moonlight-stream.org) is an open source client for NVIDIA GameStream and [Sunshine](https://github.com/LizardByte/Sunshine).
+Everything Moonlight for Android does still works: Aurora remains fully compatible with stock
+Sunshine and GameStream hosts using H.264, HEVC, and AV1.
 
-Moonlight for Android will allow you to stream your full collection of games from your Windows PC to your Android device,
-whether in your own home or over the internet.
+Aurora uses its own application ID (`com.aurora.client`), so it installs alongside official
+Moonlight rather than replacing it, per upstream's request that forks change the ID.
 
-Moonlight also has a [PC client](https://github.com/moonlight-stream/moonlight-qt) and [iOS/tvOS client](https://github.com/moonlight-stream/moonlight-ios).
+## What the fork adds
 
-You can follow development on our [Discord server](https://moonlight-stream.org/discord) and help translate Moonlight into your language on [Weblate](https://hosted.weblate.org/projects/moonlight/moonlight-android/).
+- **PyroWave decoder** (vendored from the [WiVRn](https://github.com/WiVRn/WiVRn) fork of
+  [Hans-Kristian Arntzen's PyroWave](https://github.com/Themaister/pyrowave)): JNI Vulkan compute
+  decode with pipelined presentation.
+- **Display-timing frame pacing**: `VK_GOOGLE_display_timing` feedback reported to the host for
+  phase-locked frame delivery.
+- **Loss resilience**: partial-frame salvage and per-packet parser resynchronization, plus
+  self-initializing decode state that converges via the host's rolling refresh.
+- **New settings**: force the PyroWave codec, and opt into adaptive FEC and adaptive bitrate.
+- **Rebranding**: Aurora name and artwork.
 
-## Downloads
-* [Google Play Store](https://play.google.com/store/apps/details?id=com.limelight)
-* [Amazon App Store](https://www.amazon.com/gp/product/B00JK4MFN2)
-* [F-Droid](https://f-droid.org/packages/com.limelight)
-* [APK](https://github.com/moonlight-stream/moonlight-android/releases)
+PyroWave requires a Solarflare host; there is also an
+[Aurora PC client](https://github.com/Koloses/aurora-qt).
 
 ## Building
-* Install Android Studio and the Android NDK
-* Run ‘git submodule update --init --recursive’ from within moonlight-android/
-* In moonlight-android/, create a file called ‘local.properties’. Add an ‘ndk.dir=’ property to the local.properties file and set it equal to your NDK directory.
-* Build the APK using Android Studio or gradle
 
-## Authors
-
-* [Cameron Gutman](https://github.com/cgutman)  
-* [Diego Waxemberg](https://github.com/dwaxemberg)  
-* [Aaron Neyer](https://github.com/Aaronneyer)  
-* [Andrew Hennessy](https://github.com/yetanothername)
-
-Moonlight is the work of students at [Case Western](http://case.edu) and was
-started as a project at [MHacks](http://mhacks.org).
+- Install Android Studio and the Android NDK.
+- Run `git submodule update --init --recursive` from within the repository.
+- Create `local.properties` with an `ndk.dir=` property pointing at your NDK.
+- The PyroWave decoder needs the Vulkan C++ headers and shader generation tools: pass
+  `-PvulkanHeaders=/path/containing/vulkan/vulkan.hpp` to gradle (or copy the headers into
+  `app/src/main/jni/pyrowave/external/`), and have `python
